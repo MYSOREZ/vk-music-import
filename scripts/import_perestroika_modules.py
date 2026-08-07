@@ -134,10 +134,13 @@ def find_in_library(library_index, artist: str, title: str):
     return item if ratio >= 0.6 else None
 
 
-def find_track(vk, library_index, artist: str, title: str, strict: bool):
+def find_track(vk, library_index, artist: str, title: str, strict: bool, use_search: bool = True):
     item = find_in_library(library_index, artist, title)
     if item:
         return item, "library"
+
+    if not use_search:
+        return None, None
 
     query = f"{artist} {title}"
     try:
@@ -178,6 +181,11 @@ def main():
     ap.add_argument("--sleep", type=float, default=1.0, help="пауза между запросами audio.search, сек")
     ap.add_argument("--captcha-pause", type=float, default=5.0, help="пауза после решения капчи, сек")
     ap.add_argument("--dry-run", action="store_true", help="только найти треки, ничего не создавать/добавлять")
+    ap.add_argument(
+        "--library-only",
+        action="store_true",
+        help="искать только в своей аудиотеке (audio.get), без audio.search — капча вообще не появится",
+    )
     args = ap.parse_args()
 
     token = os.environ.get("VK_TOKEN")
@@ -206,7 +214,9 @@ def main():
         found_items = []
         not_found = []
         for artist, title in tracks:
-            item, source = find_track(vk, library_index, artist, title, args.strict)
+            item, source = find_track(
+                vk, library_index, artist, title, args.strict, use_search=not args.library_only
+            )
             if item:
                 found_items.append((artist, title, item))
                 tag = "б-ка" if source == "library" else "поиск"
@@ -223,6 +233,7 @@ def main():
             "found": len(found_items),
             "not_found": [f"{a} — {t}" for a, t in not_found],
         }
+        print(f"  Итог по модулю: {len(found_items)}/{len(tracks)} найдено, {len(not_found)} не найдено")
 
         if args.dry_run:
             continue
