@@ -151,13 +151,32 @@ def find_track(vk, library_index, artist: str, title: str, strict: bool):
     return None, None
 
 
+def make_captcha_handler(pause_after: float):
+    """Ручной ввод капчи: показывает ссылку на картинку, ждёт код в терминале
+    и повторяет исходный запрос. Пустой ввод — пропустить этот запрос."""
+
+    def handler(captcha):
+        print("\n    [CAPTCHA] Открой ссылку и введи код с картинки:")
+        print(f"    {captcha.get_url()}")
+        key = input("    Код с картинки (Enter — пропустить): ").strip()
+        if not key:
+            raise captcha
+        try:
+            return captcha.try_again(key)
+        finally:
+            time.sleep(pause_after)
+
+    return handler
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modules-dir", default="../Perestroika")
     ap.add_argument("--strict", action="store_true", default=True)
     ap.add_argument("--no-strict", dest="strict", action="store_false")
     ap.add_argument("--add-to-library", type=int, default=0)
-    ap.add_argument("--sleep", type=float, default=0.4, help="пауза между запросами, сек")
+    ap.add_argument("--sleep", type=float, default=1.0, help="пауза между запросами audio.search, сек")
+    ap.add_argument("--captcha-pause", type=float, default=5.0, help="пауза после решения капчи, сек")
     ap.add_argument("--dry-run", action="store_true", help="только найти треки, ничего не создавать/добавлять")
     args = ap.parse_args()
 
@@ -165,7 +184,7 @@ def main():
     if not token:
         sys.exit("Не задан VK_TOKEN (переменная окружения)")
 
-    session = vk_api.VkApi(token=token)
+    session = vk_api.VkApi(token=token, captcha_handler=make_captcha_handler(args.captcha_pause))
     vk = session.get_api()
 
     print("Скачиваю твою аудиотеку VK...")
