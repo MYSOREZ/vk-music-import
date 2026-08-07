@@ -63,16 +63,24 @@ def parse_module(path: str):
     return tracks
 
 
+ARTIST_SPLIT_RE = re.compile(r"\bfeat\.?\b|\bft\.?\b|&|,|;|\bx\b", re.IGNORECASE)
+
+
+def split_artists(s: str):
+    """VK хранит совместных исполнителей одной строкой ('Тони Раут, Talibal',
+    'A feat. B'), а в треклисте обычно указан только основной — разбиваем,
+    чтобы искать по каждому имени в связке отдельно."""
+    parts = [p.strip() for p in ARTIST_SPLIT_RE.split(s) if p.strip()]
+    return parts or [s.strip()]
+
+
 def artists_match(expected: str, found: str) -> bool:
     e = normalize(expected)
     f = normalize(found)
     if e == f:
         return True
-    # разбиваем составных исполнителей (feat., &, x, ,)
-    parts_e = re.split(r"\bfeat\.?\b|&|,|\bx\b", e)
-    parts_f = re.split(r"\bfeat\.?\b|&|,|\bx\b", f)
-    parts_e = [p.strip() for p in parts_e if p.strip()]
-    parts_f = [p.strip() for p in parts_f if p.strip()]
+    parts_e = [normalize(p) for p in split_artists(e)]
+    parts_f = [normalize(p) for p in split_artists(f)]
     for pe in parts_e:
         for pf in parts_f:
             if pe == pf:
@@ -101,7 +109,12 @@ def fetch_library(vk):
 def index_library(items):
     index = defaultdict(list)
     for it in items:
-        index[normalize(it.get("artist", ""))].append(it)
+        full_artist = it.get("artist", "")
+        keys = {normalize(full_artist)}
+        keys.update(normalize(p) for p in split_artists(full_artist))
+        for key in keys:
+            if key and it not in index[key]:
+                index[key].append(it)
     return index
 
 
@@ -121,13 +134,14 @@ def best_title_match(title: str, candidates):
 
 
 def find_in_library(library_index, artist: str, title: str):
-    artist_n = normalize(artist)
-    candidates = list(library_index.get(artist_n, []))
-    if not candidates:
-        # ищем среди составных исполнителей (feat., &, x, ,)
-        parts = [p.strip() for p in re.split(r"\bfeat\.?\b|&|,|\bx\b", artist_n) if p.strip()]
-        for p in parts:
-            candidates.extend(library_index.get(p, []))
+    seen_ids = set()
+    candidates = []
+    for key in {normalize(artist)} | {normalize(p) for p in split_artists(artist)}:
+        for it in library_index.get(key, []):
+            uid = (it.get("owner_id"), it.get("id"))
+            if uid not in seen_ids:
+                seen_ids.add(uid)
+                candidates.append(it)
     if not candidates:
         return None
     item, ratio = best_title_match(title, candidates)
