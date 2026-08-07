@@ -88,6 +88,39 @@ def artists_match(expected: str, found: str) -> bool:
     return False
 
 
+def get_existing_playlists(vk, owner_id):
+    """title -> playlist_id для уже созданных плейлистов пользователя."""
+    result = {}
+    offset = 0
+    page = 200
+    while True:
+        resp = vk.audio.getPlaylists(owner_id=owner_id, count=page, offset=offset)
+        items = resp.get("items", [])
+        for pl in items:
+            result[pl["title"]] = pl["id"]
+        total = resp.get("count", len(items))
+        offset += len(items)
+        if not items or offset >= total:
+            break
+    return result
+
+
+def get_playlist_track_ids(vk, owner_id, playlist_id):
+    ids = set()
+    offset = 0
+    page = 1000
+    while True:
+        resp = vk.audio.get(owner_id=owner_id, playlist_id=playlist_id, count=page, offset=offset)
+        items = resp.get("items", [])
+        for it in items:
+            ids.add(f"{it['owner_id']}_{it['id']}")
+        total = resp.get("count", len(items))
+        offset += len(items)
+        if not items or offset >= total:
+            break
+    return ids
+
+
 def fetch_library(vk):
     """Скачивает всю личную аудиотеку пользователя (audio.get), чтобы искать
     треки среди уже имеющихся, а не через урезанный для сторонних приложений
@@ -256,29 +289,56 @@ def main():
         if args.dry_run:
             continue
 
-        pl = vk.audio.createPlaylist(owner_id=user_id, title=playlist_title)
-        playlist_id = pl["id"]
-        owner_id = pl["owner_id"]
+        existing = get_existing_playlists(vk, user_id)
+        desired_ids = {f"{it['owner_id']}_{it['id']}": it for _, _, it in found_items}
 
-        audio_ids = [f"{it['owner_id']}_{it['id']}" for _, _, it in found_items]
-        for i in range(0, len(audio_ids), 100):
-            chunk = audio_ids[i : i + 100]
+        if playlist_title in existing:
+            playlist_id = existing[playlist_title]
+            owner_id = user_id
+            current_ids = get_playlist_track_ids(vk, owner_id, playlist_id)
+            to_add = [aid for aid in desired_ids if aid not in current_ids]
+            to_remove = [aid for aid in current_ids if aid not in desired_ids]
+            print(f"  Плейлист уже существует (id={playlist_id}): добавить {len(to_add)}, убрать {len(to_remove)}")
+        else:
+            pl = vk.audio.createPlaylist(owner_id=user_id, title=playlist_title)
+            playlist_id = pl["id"]
+            owner_id = pl["owner_id"]
+            to_add = list(desired_ids.keys())
+            to_remove = []
+
+        for i in range(0, len(to_add), 100):
+            chunk = to_add[i : i + 100]
             vk.audio.addToPlaylist(
                 owner_id=owner_id,
                 playlist_id=playlist_id,
                 audio_ids=",".join(chunk),
             )
             if args.add_to_library:
-                for _, _, it in found_items[i : i + 100]:
+                for aid in chunk:
+                    it = desired_ids[aid]
                     try:
                         vk.audio.add(audio_id=it["id"], owner_id=it["owner_id"])
                     except vk_api.exceptions.VkApiError as e:
                         print(f"    ! не удалось добавить в библиотеку: {e}")
             time.sleep(args.sleep)
 
+        for aid in to_remove:
+            aid_owner, aid_id = aid.split("_", 1)
+            try:
+                vk.audio.removeFromPlaylist(
+                    owner_id=owner_id,
+                    playlist_id=playlist_id,
+                    audio_ids=aid_id,
+                )
+            except vk_api.exceptions.VkApiError as e:
+                print(f"    ! не удалось убрать {aid}: {e}")
+            time.sleep(args.sleep)
+
         url = f"https://vk.com/audios{owner_id}?section=all&z=audio_playlist{owner_id}_{playlist_id}"
         report[playlist_title]["url"] = url
-        print(f"  -> плейлист создан: {url}")
+        report[playlist_title]["added"] = len(to_add)
+        report[playlist_title]["removed"] = len(to_remove)
+        print(f"  -> плейлист синхронизирован: {url}")
 
     print("\n\n=== ИТОГ ===")
     print(json.dumps(report, ensure_ascii=False, indent=2))
