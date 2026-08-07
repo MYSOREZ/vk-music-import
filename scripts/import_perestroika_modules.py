@@ -81,7 +81,7 @@ def artists_match(expected: str, found: str) -> bool:
 def find_track(vk, artist: str, title: str, strict: bool):
     query = f"{artist} {title}"
     try:
-        resp = vk.method("audio.search", {"q": query, "count": 10, "auto_complete": 1})
+        resp = vk.audio.search(q=query, count=10, auto_complete=1)
     except vk_api.exceptions.VkApiError as e:
         print(f"    ! ошибка поиска: {e}")
         return None
