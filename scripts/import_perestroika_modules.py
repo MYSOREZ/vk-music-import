@@ -182,9 +182,11 @@ def main():
     ap.add_argument("--captcha-pause", type=float, default=5.0, help="пауза после решения капчи, сек")
     ap.add_argument("--dry-run", action="store_true", help="только найти треки, ничего не создавать/добавлять")
     ap.add_argument(
-        "--library-only",
+        "--search-fallback",
         action="store_true",
-        help="искать только в своей аудиотеке (audio.get), без audio.search — капча вообще не появится",
+        help="если трек не нашёлся в твоей аудиотеке — дополнительно попробовать audio.search "
+        "(общий каталог VK, может потребовать капчу). По умолчанию выключено: все треки и так "
+        "лежат в твоей библиотеке, искать вовне незачем.",
     )
     args = ap.parse_args()
 
@@ -215,7 +217,7 @@ def main():
         not_found = []
         for artist, title in tracks:
             item, source = find_track(
-                vk, library_index, artist, title, args.strict, use_search=not args.library_only
+                vk, library_index, artist, title, args.strict, use_search=args.search_fallback
             )
             if item:
                 found_items.append((artist, title, item))
