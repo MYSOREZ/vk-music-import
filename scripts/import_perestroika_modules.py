@@ -227,6 +227,13 @@ def main():
     ap.add_argument("--add-to-library", type=int, default=0)
     ap.add_argument("--sleep", type=float, default=1.0, help="пауза между запросами audio.search, сек")
     ap.add_argument("--captcha-pause", type=float, default=5.0, help="пауза после решения капчи, сек")
+    ap.add_argument(
+        "--chunk-size",
+        type=int,
+        default=25,
+        help="сколько треков добавлять в плейлист за один audio.addToPlaylist (VK может молча "
+        "не принимать всю пачку из 100 — пробуем меньшими порциями и проверяем результат)",
+    )
     ap.add_argument("--dry-run", action="store_true", help="только найти треки, ничего не создавать/добавлять")
     ap.add_argument(
         "--search-fallback",
@@ -306,13 +313,18 @@ def main():
             to_add = list(desired_ids.keys())
             to_remove = []
 
-        for i in range(0, len(to_add), 100):
-            chunk = to_add[i : i + 100]
-            vk.audio.addToPlaylist(
-                owner_id=owner_id,
-                playlist_id=playlist_id,
-                audio_ids=",".join(chunk),
-            )
+        chunk_size = args.chunk_size
+        for i in range(0, len(to_add), chunk_size):
+            chunk = to_add[i : i + chunk_size]
+            try:
+                resp = vk.audio.addToPlaylist(
+                    owner_id=owner_id,
+                    playlist_id=playlist_id,
+                    audio_ids=",".join(chunk),
+                )
+                print(f"    addToPlaylist [{i}:{i+len(chunk)}] запрошено={len(chunk)} ответ={resp}")
+            except vk_api.exceptions.VkApiError as e:
+                print(f"    ! addToPlaylist упал на пачке [{i}:{i+len(chunk)}]: {e}")
             if args.add_to_library:
                 for aid in chunk:
                     it = desired_ids[aid]
@@ -334,11 +346,28 @@ def main():
                 print(f"    ! не удалось убрать {aid}: {e}")
             time.sleep(args.sleep)
 
+        # Проверяем, что реально долетело до VK, а не просто "запрошено".
+        actual_ids = get_playlist_track_ids(vk, owner_id, playlist_id)
+        still_missing = [aid for aid in desired_ids if aid not in actual_ids]
+        if still_missing:
+            print(f"  Проверка: не хватает {len(still_missing)} треков после пачечного добавления, добираю по одному...")
+            for aid in still_missing:
+                try:
+                    resp = vk.audio.addToPlaylist(owner_id=owner_id, playlist_id=playlist_id, audio_ids=aid)
+                    print(f"    + добавлен поштучно {aid} ({desired_ids[aid].get('artist')} — {desired_ids[aid].get('title')}) ответ={resp}")
+                except vk_api.exceptions.VkApiError as e:
+                    print(f"    ! не добавился даже поштучно {aid}: {e}")
+                time.sleep(args.sleep)
+            actual_ids = get_playlist_track_ids(vk, owner_id, playlist_id)
+            still_missing = [aid for aid in desired_ids if aid not in actual_ids]
+
         url = f"https://vk.com/audios{owner_id}?section=all&z=audio_playlist{owner_id}_{playlist_id}"
         report[playlist_title]["url"] = url
         report[playlist_title]["added"] = len(to_add)
         report[playlist_title]["removed"] = len(to_remove)
-        print(f"  -> плейлист синхронизирован: {url}")
+        report[playlist_title]["actual_count"] = len(actual_ids)
+        report[playlist_title]["still_missing"] = len(still_missing)
+        print(f"  -> плейлист синхронизирован: {url} (фактически в плейлисте: {len(actual_ids)}/{len(desired_ids)})")
 
     print("\n\n=== ИТОГ ===")
     print(json.dumps(report, ensure_ascii=False, indent=2))
