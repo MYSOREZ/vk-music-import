@@ -211,6 +211,8 @@ def main():
     session = vk_api.VkApi(token=token, captcha_handler=make_captcha_handler(args.captcha_pause))
     vk = session.get_api()
 
+    user_id = vk.users.get()[0]["id"]
+
     print("Скачиваю твою аудиотеку VK...")
     library_items = fetch_library(vk)
     library_index = index_library(library_items)
@@ -254,7 +256,7 @@ def main():
         if args.dry_run:
             continue
 
-        pl = vk.audio.createPlaylist(group_id=0, title=playlist_title)
+        pl = vk.audio.createPlaylist(owner_id=user_id, title=playlist_title)
         playlist_id = pl["id"]
         owner_id = pl["owner_id"]
 
