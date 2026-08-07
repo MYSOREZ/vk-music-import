@@ -12,12 +12,14 @@ Headless-версия vk-music-import: создаёт по одному плей
     https://oauth.vk.com/oauth/authorize?client_id=6121396&scope=audio,offline&redirect_uri=https://oauth.vk.com/blank.html&display=page&response_type=token
 """
 import argparse
+import difflib
 import json
 import os
 import re
 import sys
 import time
 import unicodedata
+from collections import defaultdict
 
 import vk_api
 
@@ -78,17 +80,75 @@ def artists_match(expected: str, found: str) -> bool:
     return False
 
 
-def find_track(vk, artist: str, title: str, strict: bool):
+def fetch_library(vk):
+    """Скачивает всю личную аудиотеку пользователя (audio.get), чтобы искать
+    треки среди уже имеющихся, а не через урезанный для сторонних приложений
+    audio.search по общему каталогу."""
+    items = []
+    offset = 0
+    page = 6000
+    while True:
+        resp = vk.audio.get(count=page, offset=offset)
+        batch = resp.get("items", [])
+        items.extend(batch)
+        total = resp.get("count", len(items))
+        offset += len(batch)
+        if not batch or offset >= total:
+            break
+    return items
+
+
+def index_library(items):
+    index = defaultdict(list)
+    for it in items:
+        index[normalize(it.get("artist", ""))].append(it)
+    return index
+
+
+def best_title_match(title: str, candidates):
+    title_n = normalize(title)
+    best_item, best_ratio = None, 0.0
+    for it in candidates:
+        cand_n = normalize(it.get("title", ""))
+        if cand_n == title_n:
+            return it, 1.0
+        ratio = difflib.SequenceMatcher(None, title_n, cand_n).ratio()
+        if title_n in cand_n or cand_n in title_n:
+            ratio = max(ratio, 0.85)
+        if ratio > best_ratio:
+            best_item, best_ratio = it, ratio
+    return best_item, best_ratio
+
+
+def find_in_library(library_index, artist: str, title: str):
+    artist_n = normalize(artist)
+    candidates = list(library_index.get(artist_n, []))
+    if not candidates:
+        # ищем среди составных исполнителей (feat., &, x, ,)
+        parts = [p.strip() for p in re.split(r"\bfeat\.?\b|&|,|\bx\b", artist_n) if p.strip()]
+        for p in parts:
+            candidates.extend(library_index.get(p, []))
+    if not candidates:
+        return None
+    item, ratio = best_title_match(title, candidates)
+    return item if ratio >= 0.6 else None
+
+
+def find_track(vk, library_index, artist: str, title: str, strict: bool):
+    item = find_in_library(library_index, artist, title)
+    if item:
+        return item, "library"
+
     query = f"{artist} {title}"
     try:
         resp = vk.audio.search(q=query, count=10, auto_complete=1)
     except vk_api.exceptions.VkApiError as e:
         print(f"    ! ошибка поиска: {e}")
-        return None
+        return None, None
     for item in resp.get("items", []):
         if not strict or artists_match(artist, item.get("artist", "")):
-            return item
-    return None
+            return item, "search"
+    return None, None
 
 
 def main():
@@ -108,6 +168,11 @@ def main():
     session = vk_api.VkApi(token=token)
     vk = session.get_api()
 
+    print("Скачиваю твою аудиотеку VK...")
+    library_items = fetch_library(vk)
+    library_index = index_library(library_items)
+    print(f"В библиотеке {len(library_items)} треков, будем искать сначала среди них.")
+
     report = {}
 
     for filename, playlist_title in MODULE_FILES:
@@ -122,14 +187,17 @@ def main():
         found_items = []
         not_found = []
         for artist, title in tracks:
-            item = find_track(vk, artist, title, args.strict)
+            item, source = find_track(vk, library_index, artist, title, args.strict)
             if item:
                 found_items.append((artist, title, item))
-                print(f"  + {artist} — {title}")
+                tag = "б-ка" if source == "library" else "поиск"
+                print(f"  + [{tag}] {artist} — {title}")
             else:
                 not_found.append((artist, title))
                 print(f"  - НЕ НАЙДЕНО: {artist} — {title}")
-            time.sleep(args.sleep)
+            if source != "library":
+                # запрос ушёл в audio.search (найден он или нет) — соблюдаем паузу
+                time.sleep(args.sleep)
 
         report[playlist_title] = {
             "total": len(tracks),
