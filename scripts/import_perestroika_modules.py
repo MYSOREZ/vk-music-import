@@ -261,6 +261,10 @@ def main():
     report = {}
     mutation_state = {"blocked": False}
 
+    # Фаза 1: только чтение — сопоставление треков и подсчёт разницы с уже
+    # существующими плейлистами. Ничего не пишем в VK на этом шаге.
+    existing = get_existing_playlists(vk, user_id)
+    plan = []
     for filename, playlist_title in MODULE_FILES:
         path = os.path.join(args.modules_dir, filename)
         if not os.path.exists(path):
@@ -297,7 +301,6 @@ def main():
         if args.dry_run:
             continue
 
-        existing = get_existing_playlists(vk, user_id)
         desired_ids = {f"{it['owner_id']}_{it['id']}": it for _, _, it in found_items}
 
         if playlist_title in existing:
@@ -306,13 +309,47 @@ def main():
             current_ids = get_playlist_track_ids(vk, owner_id, playlist_id)
             to_add = [aid for aid in desired_ids if aid not in current_ids]
             to_remove = [aid for aid in current_ids if aid not in desired_ids]
-            print(f"  Плейлист уже существует (id={playlist_id}): добавить {len(to_add)}, убрать {len(to_remove)}")
         else:
             pl = vk.audio.createPlaylist(owner_id=user_id, title=playlist_title)
             playlist_id = pl["id"]
             owner_id = pl["owner_id"]
             to_add = list(desired_ids.keys())
             to_remove = []
+
+        print(f"  Плейлист id={playlist_id}: добавить {len(to_add)}, убрать {len(to_remove)}")
+        plan.append(
+            {
+                "playlist_title": playlist_title,
+                "playlist_id": playlist_id,
+                "owner_id": owner_id,
+                "desired_ids": desired_ids,
+                "to_add": to_add,
+                "to_remove": to_remove,
+            }
+        )
+
+    if args.dry_run:
+        print("\n\n=== ИТОГ (dry-run) ===")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    # Фаза 2: применяем изменения, начиная с модулей, где дефицит меньше —
+    # если квота VK на мутации кончится на середине, маленькие модули успеют
+    # закрыться полностью, а не всё упрётся в самый большой ("Форсаж").
+    plan.sort(key=lambda p: len(p["to_add"]) + len(p["to_remove"]))
+    print(
+        "\nПорядок применения изменений (сначала с наименьшим дефицитом): "
+        + ", ".join(f"{p['playlist_title']} ({len(p['to_add']) + len(p['to_remove'])})" for p in plan)
+    )
+
+    for p in plan:
+        playlist_title = p["playlist_title"]
+        playlist_id = p["playlist_id"]
+        owner_id = p["owner_id"]
+        desired_ids = p["desired_ids"]
+        to_add = p["to_add"]
+        to_remove = p["to_remove"]
+        print(f"\n--- {playlist_title} (id={playlist_id}) ---")
 
         chunk_size = args.chunk_size
         if not mutation_state["blocked"]:
