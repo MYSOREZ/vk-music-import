@@ -259,6 +259,7 @@ def main():
     print(f"В библиотеке {len(library_items)} треков, будем искать сначала среди них.")
 
     report = {}
+    mutation_state = {"blocked": False}
 
     for filename, playlist_title in MODULE_FILES:
         path = os.path.join(args.modules_dir, filename)
@@ -314,47 +315,68 @@ def main():
             to_remove = []
 
         chunk_size = args.chunk_size
-        for i in range(0, len(to_add), chunk_size):
-            chunk = to_add[i : i + chunk_size]
-            try:
-                resp = vk.audio.addToPlaylist(
-                    owner_id=owner_id,
-                    playlist_id=playlist_id,
-                    audio_ids=",".join(chunk),
-                )
-                print(f"    addToPlaylist [{i}:{i+len(chunk)}] запрошено={len(chunk)} ответ={resp}")
-            except vk_api.exceptions.VkApiError as e:
-                print(f"    ! addToPlaylist упал на пачке [{i}:{i+len(chunk)}]: {e}")
-            if args.add_to_library:
-                for aid in chunk:
-                    it = desired_ids[aid]
-                    try:
-                        vk.audio.add(audio_id=it["id"], owner_id=it["owner_id"])
-                    except vk_api.exceptions.VkApiError as e:
-                        print(f"    ! не удалось добавить в библиотеку: {e}")
-            time.sleep(args.sleep)
+        if not mutation_state["blocked"]:
+            for i in range(0, len(to_add), chunk_size):
+                chunk = to_add[i : i + chunk_size]
+                try:
+                    resp = vk.audio.addToPlaylist(
+                        owner_id=owner_id,
+                        playlist_id=playlist_id,
+                        audio_ids=",".join(chunk),
+                    )
+                    print(f"    addToPlaylist [{i}:{i+len(chunk)}] запрошено={len(chunk)} ответ={resp}")
+                    if not resp:
+                        mutation_state["blocked"] = True
+                        print(
+                            "  !! VK вернул пустой ответ на добавление (0 треков реально добавлено). "
+                            "Похоже, для этого токена/приложения сейчас недоступны изменения плейлистов "
+                            "(лимит/анти-абуз после серии правок). Останавливаю попытки добавления для "
+                            "ВСЕХ модулей в этом запуске — не долблю API впустую. Остальное (поиск "
+                            "совпадений) продолжит работать в режиме только чтения."
+                        )
+                        break
+                except vk_api.exceptions.VkApiError as e:
+                    print(f"    ! addToPlaylist упал на пачке [{i}:{i+len(chunk)}]: {e}")
+                if args.add_to_library:
+                    for aid in chunk:
+                        it = desired_ids[aid]
+                        try:
+                            vk.audio.add(audio_id=it["id"], owner_id=it["owner_id"])
+                        except vk_api.exceptions.VkApiError as e:
+                            print(f"    ! не удалось добавить в библиотеку: {e}")
+                time.sleep(args.sleep)
 
-        for aid in to_remove:
-            aid_owner, aid_id = aid.split("_", 1)
-            try:
-                vk.audio.removeFromPlaylist(
-                    owner_id=owner_id,
-                    playlist_id=playlist_id,
-                    audio_ids=aid_id,
-                )
-            except vk_api.exceptions.VkApiError as e:
-                print(f"    ! не удалось убрать {aid}: {e}")
-            time.sleep(args.sleep)
+        if not mutation_state["blocked"]:
+            for aid in to_remove:
+                aid_owner, aid_id = aid.split("_", 1)
+                try:
+                    resp = vk.audio.removeFromPlaylist(
+                        owner_id=owner_id,
+                        playlist_id=playlist_id,
+                        audio_ids=aid_id,
+                    )
+                    if not resp:
+                        mutation_state["blocked"] = True
+                        print("  !! VK вернул пустой ответ на удаление — тоже похоже на блокировку мутаций.")
+                        break
+                except vk_api.exceptions.VkApiError as e:
+                    print(f"    ! не удалось убрать {aid}: {e}")
+                time.sleep(args.sleep)
 
         # Проверяем, что реально долетело до VK, а не просто "запрошено".
         actual_ids = get_playlist_track_ids(vk, owner_id, playlist_id)
         still_missing = [aid for aid in desired_ids if aid not in actual_ids]
-        if still_missing:
+        if still_missing and not mutation_state["blocked"]:
             print(f"  Проверка: не хватает {len(still_missing)} треков после пачечного добавления, добираю по одному...")
             for aid in still_missing:
                 try:
                     resp = vk.audio.addToPlaylist(owner_id=owner_id, playlist_id=playlist_id, audio_ids=aid)
-                    print(f"    + добавлен поштучно {aid} ({desired_ids[aid].get('artist')} — {desired_ids[aid].get('title')}) ответ={resp}")
+                    if resp:
+                        print(f"    + добавлен поштучно {aid} ({desired_ids[aid].get('artist')} — {desired_ids[aid].get('title')}) ответ={resp}")
+                    else:
+                        mutation_state["blocked"] = True
+                        print(f"    !! пустой ответ на поштучное добавление {aid} — прекращаю попытки, блокировка подтвердилась.")
+                        break
                 except vk_api.exceptions.VkApiError as e:
                     print(f"    ! не добавился даже поштучно {aid}: {e}")
                 time.sleep(args.sleep)
@@ -373,6 +395,15 @@ def main():
     print(json.dumps(report, ensure_ascii=False, indent=2))
     with open("import_report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+
+    if mutation_state["blocked"]:
+        print(
+            "\n!!! VK перестал принимать изменения плейлистов в этом запуске (пустые ответы на "
+            "addToPlaylist/removeFromPlaylist). Совпадения треков посчитаны верно (см. found выше), "
+            "но реально дозаписать оставшееся сейчас нельзя. Подожди несколько часов (лучше сутки) "
+            "и запусти скрипт заново со свежим токеном — счётчик actual_count/still_missing в отчёте "
+            "покажет, что реально долетело."
+        )
 
 
 if __name__ == "__main__":
