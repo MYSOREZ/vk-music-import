@@ -106,6 +106,19 @@ def save_reject_cache(path, cache):
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
+def cache_entry_on_cooldown(entry, ttl_hours):
+    """True, если с последней неудачи прошло меньше ttl_hours — ещё рано пробовать снова."""
+    last_tried = entry.get("last_tried")
+    if not last_tried:
+        return False
+    try:
+        last_dt = datetime.fromisoformat(last_tried)
+    except ValueError:
+        return False
+    age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+    return age_hours < ttl_hours
+
+
 def get_existing_playlists(vk, owner_id):
     """title -> playlist_id для уже созданных плейлистов пользователя."""
     result = {}
@@ -269,7 +282,15 @@ def main():
     ap.add_argument(
         "--retry-known-failures",
         action="store_true",
-        help="всё равно попробовать треки из кэша отказов (вдруг у VK что-то поменялось)",
+        help="попробовать треки из кэша отказов прямо сейчас, не дожидаясь истечения --cache-ttl-hours",
+    )
+    ap.add_argument(
+        "--cache-ttl-hours",
+        type=float,
+        default=3.0,
+        help="сколько часов не повторять отказавший трек. Похоже, у VK не постоянный запрет на "
+        "конкретные треки, а плавающая квота на запись — трек, которому не повезло попасть в "
+        "закрытое окно, скорее всего добавится позже без вмешательства",
     )
     args = ap.parse_args()
 
@@ -350,12 +371,15 @@ def main():
             to_remove = []
 
         if not args.retry_known_failures:
-            skip_cached = [aid for aid in to_add if aid in reject_cache]
+            skip_cached = [
+                aid for aid in to_add
+                if aid in reject_cache and cache_entry_on_cooldown(reject_cache[aid], args.cache_ttl_hours)
+            ]
             if skip_cached:
-                to_add = [aid for aid in to_add if aid not in reject_cache]
+                to_add = [aid for aid in to_add if aid not in skip_cached]
                 print(
-                    f"  Пропускаю {len(skip_cached)} трек(ов) из кэша отказов "
-                    "(--retry-known-failures — чтобы всё же попробовать снова)"
+                    f"  Пропускаю {len(skip_cached)} трек(ов) — недавно отказали, ещё не прошло "
+                    f"{args.cache_ttl_hours}ч (--retry-known-failures — чтобы всё же попробовать сейчас)"
                 )
 
         print(f"  Плейлист id={playlist_id}: добавить {len(to_add)}, убрать {len(to_remove)}")
