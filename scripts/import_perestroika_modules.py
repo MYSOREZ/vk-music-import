@@ -20,8 +20,11 @@ import sys
 import time
 import unicodedata
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import vk_api
+
+DEFAULT_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reject_cache.json")
 
 MODULE_FILES = [
     ("module1-forsazh.md", "🔴 Форсаж"),
@@ -86,6 +89,21 @@ def artists_match(expected: str, found: str) -> bool:
             if pe == pf:
                 return True
     return False
+
+
+def load_reject_cache(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_reject_cache(path, cache):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
 def get_existing_playlists(vk, owner_id):
@@ -242,6 +260,17 @@ def main():
         "(общий каталог VK, может потребовать капчу). По умолчанию выключено: все треки и так "
         "лежат в твоей библиотеке, искать вовне незачем.",
     )
+    ap.add_argument(
+        "--cache-file",
+        default=DEFAULT_CACHE_FILE,
+        help="куда сохранять список треков, которые VK стабильно отказывается добавлять "
+        "(чтобы не пытаться заново при каждом запуске)",
+    )
+    ap.add_argument(
+        "--retry-known-failures",
+        action="store_true",
+        help="всё равно попробовать треки из кэша отказов (вдруг у VK что-то поменялось)",
+    )
     args = ap.parse_args()
 
     token = os.environ.get("VK_TOKEN")
@@ -257,6 +286,10 @@ def main():
     library_items = fetch_library(vk)
     library_index = index_library(library_items)
     print(f"В библиотеке {len(library_items)} треков, будем искать сначала среди них.")
+
+    reject_cache = load_reject_cache(args.cache_file)
+    if reject_cache:
+        print(f"В кэше отказов {len(reject_cache)} треков(а) (файл: {args.cache_file})")
 
     report = {}
     mutation_state = {"blocked": False, "consecutive_fail": 0}
@@ -316,6 +349,15 @@ def main():
             to_add = list(desired_ids.keys())
             to_remove = []
 
+        if not args.retry_known_failures:
+            skip_cached = [aid for aid in to_add if aid in reject_cache]
+            if skip_cached:
+                to_add = [aid for aid in to_add if aid not in reject_cache]
+                print(
+                    f"  Пропускаю {len(skip_cached)} трек(ов) из кэша отказов "
+                    "(--retry-known-failures — чтобы всё же попробовать снова)"
+                )
+
         print(f"  Плейлист id={playlist_id}: добавить {len(to_add)}, убрать {len(to_remove)}")
         plan.append(
             {
@@ -371,6 +413,9 @@ def main():
             if resp:
                 print(f"    + {label}")
                 mutation_state["consecutive_fail"] = 0
+                if aid in reject_cache:
+                    del reject_cache[aid]
+                    save_reject_cache(args.cache_file, reject_cache)
                 if args.add_to_library:
                     try:
                         vk.audio.add(audio_id=it["id"], owner_id=it["owner_id"])
@@ -383,6 +428,13 @@ def main():
                     f"    - не добавлен: {label} "
                     f"[{mutation_state['consecutive_fail']}/{args.max_consecutive_fail} неудач подряд]"
                 )
+                reject_cache[aid] = {
+                    "artist": it.get("artist"),
+                    "title": it.get("title"),
+                    "fails": reject_cache.get(aid, {}).get("fails", 0) + 1,
+                    "last_tried": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                save_reject_cache(args.cache_file, reject_cache)
                 if mutation_state["consecutive_fail"] >= args.max_consecutive_fail:
                     mutation_state["blocked"] = True
                     print(
@@ -428,6 +480,12 @@ def main():
     print(json.dumps(report, ensure_ascii=False, indent=2))
     with open("import_report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+
+    if reject_cache:
+        print(
+            f"\nВ кэше отказов теперь {len(reject_cache)} трек(ов) ({args.cache_file}) — при следующих "
+            "запусках они не будут пытаться добавиться заново без --retry-known-failures."
+        )
 
     if mutation_state["blocked"]:
         print(

@@ -134,3 +134,5 @@ dmypy.json
 /отчет.txt
 /tracklist.txt
 /.gitignore
+scripts/reject_cache.json
+import_report.json
